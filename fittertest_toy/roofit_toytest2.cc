@@ -102,7 +102,7 @@ void  roofit_toytest2(int number) {
   //-------------------- Histogram fullfill for Hist PDF -----------------------------
        
 
-        TH2D *hist = new TH2D("hist","",250,-0.3,0.2,200,5.23,5.30);
+    //    TH2D *hist = new TH2D("hist","",250,-0.3,0.2,200,5.23,5.30);
 
         plambdapi->Draw("mbc0:de>>hist");
       
