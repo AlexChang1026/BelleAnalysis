@@ -1,0 +1,126 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+'''
+Script that produces a nice table with the informations on the
+runs since the beginning of the shift by collecting the information
+from the "New run" entries of the elog.
+Can be useful for the end of shift report.
+'''
+
+import sys
+import os
+import requests
+from requests.auth import HTTPBasicAuth
+from getpass import getpass, getuser
+from lxml import html
+import re
+import time
+import argparse
+from collections import namedtuple
+
+# Python 2/3 compatibility
+if sys.version[0] == '2':
+    input = raw_input
+
+def get_detectors(row):
+    '''
+    Get a string with the name of the detectors
+    included and returns a more friendly string
+    '''
+    total = 0
+    det_list = ['PXD', 'SVD', 'CDC', 'TOP', 'ARICH', 'ECL', 'KLM', 'TRG']
+    det_used = [0] * 8
+    for i, det in enumerate(det_list):
+        if det in str(row):
+            det_used[i] = 1
+            total += 1
+    if total == 0: return 'none'
+    if total < 6:
+        return '+'.join([det for det, used in zip(det_list, det_used) if used])
+    elif total < 8:
+        return 'ALL except ' + ','.join([det for det, used in zip(det_list, det_used) if not used])
+    else:
+        return 'ALL'
+
+def match_str(pattern, string, default='???'):
+    '''
+    Return first occurence of pattern in string
+    or defeult if not found
+    '''
+    try:
+        return re.findall(pattern, string)[0]
+    except IndexError:
+        return default
+
+def get_runs_infos(elog_entry, summaries):
+    '''
+    Takes as input the "New run" elog_entry and returns dictionary with infos about run
+    '''
+    infos = {}
+    infos['run_number'] = match_str('Runnumber: ([0-9]*)', elog_entry[3])
+    infos['run_type'] = match_str('Run type: (.*)', elog_entry[4])
+    infos['trigger_type'] = match_str('Trigger type: (.*)', elog_entry[5])
+    infos['detectors'] = get_detectors(summaries[infos['run_number']].Subdetectors)
+    infos['run_time'] = summaries[infos['run_number']].Run_time
+    infos['num_evts'] = summaries[infos['run_number']].Num_events
+    infos['stop_reason'] = match_str('Stopped because of:(.*)', elog_entry[-3]).strip()
+    infos['time_start'] = time.strptime(summaries[infos['run_number']].JSTTime, '%Y/%m/%d %H:%M JST')
+    infos['luminosity'] = match_str('Integrated Luminosity(.*)', elog_entry[-5]).strip()
+    infos['time_end'] = time.strptime(match_str('Run was stopped at (.*)', elog_entry[1]), '%Y/%m/%d %H:%M JST')
+    infos['run_trigger_type'] = infos['run_type'] + "/" + infos['trigger_type']
+    return infos
+
+
+if __name__ == '__main__':
+
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawTextHelpFormatter)
+    parser.add_argument('-m', help='Give minumum run number instead of deducing it from the time. Be careful: it does not work if the run is older than 24 hours')
+    args = parser.parse_args()
+
+    username = getuser()
+    _ = input('\nConfirm your DESY user name by pressing enter or type the correct one [%s]: ' % username)
+    if _ != '':
+        username = _
+    password = getpass()
+
+    # Get informations searching the elog for all entries of the kind "New Run" in last 24 hours
+    with requests.Session() as s:
+        page = s.post('https://elog.belle2.org/elog/Beam+Run', auth=HTTPBasicAuth(username, password),
+                      files={'uname': username, 'upassword': password,
+                             'redir': 'page?mode=full&reverse=0&npp=20&last=1&Type=%5ENew+Run%24'})
+        if page.status_code != 200:
+            raise IOError('Bad password :(')
+
+    tree = html.fromstring(page.content)
+    entries = [[j.strip() for j in i.text.split('\n')] for i in tree.xpath("//td[@class='messagelist']/pre") if i.text]
+    Summary = namedtuple('Summary', 'ID JSTTime Author Subject Type Category Exp_number Run_number Num_events Run_time Solenoid Subdetectors DQMPlots')
+    summaries = {i.Run_number : i for i in
+                 [Summary(*[j.getchildren()[0].text for j in i.getchildren()]) for i in tree.xpath("//tr[td/@class='list1'] | //tr[td/@class='list2']")]}
+
+    run_infos = [get_runs_infos(i, summaries) for i in entries]
+
+    if args.m:
+        infos = [_run for _run in run_infos if _run['run_number']==args.m]
+        if len(infos) == 0:
+            raise IOError('Run %s not found' % args.m)
+        start_time = infos[0]['time_end']
+    else:
+        # Check during which shift this script has been called
+        now = time.gmtime(time.time()+9*3600 )
+        fmt = {'year': now.tm_year, 'mon': now.tm_mon, 'day': now.tm_mday}
+        if now.tm_hour < 8: # owl shift
+            start_time = time.strptime('{year}/{mon}/{day} 00:00'.format(**fmt), '%Y/%m/%d %H:%M')
+        elif now.tm_hour < 16: # day shift
+            start_time = time.strptime('{year}/{mon}/{day} 08:00'.format(**fmt), '%Y/%m/%d %H:%M')
+        else: # swing shift
+            start_time = time.strptime('{year}/{mon}/{day} 16:00'.format(**fmt), '%Y/%m/%d %H:%M')
+
+    run_infos = [i for i in run_infos if i['time_end'] >= start_time]
+
+
+
+    print('\nRun No. | Run Type                  | Detectors             | Run Time | NUM of EVENT | Luminosity                    | Stop Reason')
+    print('=======================================================================================================================================')
+    for run in run_infos:
+        print('{run_number:^7} | {run_trigger_type:^25} | {detectors:^21} | {run_time:^8} | {num_evts:^12} | {luminosity:^29} | {stop_reason}'.format(**run))
